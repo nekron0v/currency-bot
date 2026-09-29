@@ -92,15 +92,15 @@ def _gradient(img, top, bottom):
         d.line([(0, y), (w, y)], fill=c)
 
 
-def _pattern(img, size):
-    """Крупные $ в шахматном порядке — как у @send."""
-    font = _load_font(int(size * 0.14))
-    layer = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+def _pattern(img, W, H):
+    """Крупные $ в шахматном порядке."""
+    font = _load_font(int(H * 0.15))
+    layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     ld = ImageDraw.Draw(layer)
-    step = int(size * 0.22)
-    for row_idx, y in enumerate(range(-step, size + step, step)):
+    step = int(H * 0.24)
+    for row_idx, y in enumerate(range(-step, H + step, step)):
         off = (row_idx % 2) * (step // 2)
-        for x in range(-step + off, size + step, step):
+        for x in range(-step + off, W + step, step):
             ld.text((x, y), "$", font=font, fill=PATTERN_COLOR)
     img.paste(layer, (0, 0), layer)
 
@@ -111,14 +111,12 @@ def _circle_symbol(draw, cx, cy, r, symbol, font):
 
 
 def _swap_icon(draw, cx, cy, r):
-    """Компактный ⇅ — тонкие стрелки, как у @send."""
     draw.ellipse([cx - r, cy - r, cx + r, cy + r], fill=SWAP_BG)
     color = SWAP_FG
-    # Длина стрелки внутри кружка
-    h = int(r * 0.95)
+    h = int(r * 0.9)
     w = max(2, int(r * 0.16))
-    head = int(r * 0.32)
-    gap = int(r * 0.30)
+    head = int(r * 0.3)
+    gap = int(r * 0.28)
 
     y_top = cy - h // 2
     y_bot = cy + h // 2
@@ -142,45 +140,48 @@ def _swap_icon(draw, cx, cy, r):
     ], fill=color)
 
 
-def generate_card(from_code, from_amount, to_code, to_amount, base_size=512):
+def generate_card(from_code, from_amount, to_code, to_amount,
+                  base_w=720, base_h=450):
+    """Горизонтальная карточка 720x450 (16:10), как у @send."""
     SS = 2
-    S = base_size * SS
+    W = base_w * SS           # 1440
+    H = base_h * SS           # 900
 
     # Фон
-    img = Image.new("RGB", (S, S), GRADIENT_TOP)
+    img = Image.new("RGB", (W, H), GRADIENT_TOP)
     _gradient(img, GRADIENT_TOP, GRADIENT_BOTTOM)
-    _pattern(img, S)
+    _pattern(img, W, H)
 
     draw = ImageDraw.Draw(img)
 
-    # Карточка — меньше, чем была (больше фона по краям, как у @send)
-    margin = int(S * 0.125)
-    radius = int(S * 0.09)
+    # Карточка — те же отступы по X и Y (квадратный padding вокруг)
+    margin = int(H * 0.10)           # 90 из 900 = 10%
+    radius = int(H * 0.10)           # 90
     draw.rounded_rectangle(
-        [margin, margin, S - margin, S - margin],
+        [margin, margin, W - margin, H - margin],
         radius=radius, fill=CARD_BG,
     )
 
-    # Внутренние горизонтальные отступы
-    pad_x = int(S * 0.055)
+    # Внутренние отступы карточки
+    pad_x = int(H * 0.07)            # 63
     inner_x0 = margin + pad_x
-    inner_x1 = S - margin - pad_x
+    inner_x1 = W - margin - pad_x
 
-    # Позиции строк — 34% и 66% от всего полотна (симметрично центру)
-    row1_y = int(S * 0.345)
-    row2_y = int(S * 0.655)
-    mid_y = int(S * 0.5)
+    # Позиции строк — 27% и 73% высоты (как у @send)
+    row1_y = int(H * 0.27)
+    row2_y = int(H * 0.73)
+    mid_y = H // 2
 
-    # Кружок символа валюты — меньше, чем был
-    circle_r = int(S * 0.048)
+    # Кружок символа валюты
+    circle_r = int(H * 0.053)        # 48
     circle_cx = inner_x0 + circle_r
-    code_x = circle_cx + circle_r + int(S * 0.035)
+    code_x = circle_cx + circle_r + int(H * 0.045)
 
-    # Символы и шрифты
-    f_sym = _load_font(int(S * 0.052))
-    f_code = _load_font(int(S * 0.085))
-    amount_size = int(S * 0.085)
-    min_amount_size = int(S * 0.045)
+    # Шрифты — код и сумма одинакового размера
+    f_sym = _load_font(int(H * 0.062))
+    f_code = _load_font(int(H * 0.091))
+    amount_size = int(H * 0.091)
+    min_amount_size = int(H * 0.045)
 
     def row(code, amount, y):
         _circle_symbol(draw, circle_cx, y, circle_r,
@@ -189,27 +190,26 @@ def generate_card(from_code, from_amount, to_code, to_amount, base_size=512):
         code_w = _draw_lm(draw, code_x, y, code, f_code, TEXT_COLOR)
 
         text = _fmt(amount)
-        avail_w = inner_x1 - (code_x + code_w) - int(S * 0.02)
+        avail_w = inner_x1 - (code_x + code_w) - int(H * 0.03)
         f_amount = _fit(text, avail_w, amount_size, min_amount_size)
         _draw_rm(draw, inner_x1, y, text, f_amount, TEXT_COLOR)
 
     row(from_code, from_amount, row1_y)
     row(to_code, to_amount, row2_y)
 
-    # Разделительная линия — очень светлая, с прорезью под swap
-    swap_r = int(S * 0.045)
-    line_w = max(1, int(S * 0.0022))
-    gap = int(S * 0.014)
-    line_y = mid_y
-    draw.line([(inner_x0, line_y), (S // 2 - swap_r - gap, line_y)],
+    # Разделительная линия с прорезью под swap
+    swap_r = int(H * 0.046)
+    line_w = max(1, int(H * 0.0022))
+    gap = int(H * 0.014)
+    draw.line([(inner_x0, mid_y), (W // 2 - swap_r - gap, mid_y)],
               fill=LINE_COLOR, width=line_w)
-    draw.line([(S // 2 + swap_r + gap, line_y), (inner_x1, line_y)],
+    draw.line([(W // 2 + swap_r + gap, mid_y), (inner_x1, mid_y)],
               fill=LINE_COLOR, width=line_w)
 
-    _swap_icon(draw, S // 2, mid_y, swap_r)
+    _swap_icon(draw, W // 2, mid_y, swap_r)
 
-    # Финальный ресайз со сглаживанием
-    img = img.resize((base_size, base_size), Image.LANCZOS)
+    # Ресайз со сглаживанием
+    img = img.resize((base_w, base_h), Image.LANCZOS)
 
     buf = BytesIO()
     img.save(buf, format="PNG", optimize=True)

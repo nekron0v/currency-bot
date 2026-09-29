@@ -103,8 +103,8 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 title=text,
                 description="Карточка конвертации",
                 caption=text,
-                photo_width=512,
-                photo_height=512,
+                photo_width=720,
+                photo_height=450,
             ))
 
         results.append(InlineQueryResultArticle(
