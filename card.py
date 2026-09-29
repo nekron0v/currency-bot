@@ -3,7 +3,6 @@ from io import BytesIO
 from PIL import Image, ImageDraw, ImageFont
 
 
-# Пути к жирному шрифту — ищем первый доступный
 BOLD_PATHS = [
     "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
     "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
@@ -36,6 +35,18 @@ def _fmt(x: float) -> str:
     return f"{x:.4f}".rstrip("0").rstrip(".").replace(".", ",")
 
 
+def _fit_font(text: str, max_width: int, start_size: int, min_size: int = 24):
+    """Подбирает размер шрифта так, чтобы text влез в max_width."""
+    size = start_size
+    while size > min_size:
+        f = _load_font(size)
+        bbox = f.getbbox(text)
+        if bbox[2] - bbox[0] <= max_width:
+            return f
+        size -= 4
+    return _load_font(min_size)
+
+
 def _draw_gradient(img, top, bottom):
     w, h = img.size
     draw = ImageDraw.Draw(img)
@@ -48,13 +59,12 @@ def _draw_gradient(img, top, bottom):
 
 
 def _draw_pattern(img, size):
-    """Полупрозрачные '$' на фоне."""
     font = _load_font(80)
     overlay = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     od = ImageDraw.Draw(overlay)
     step = 130
-    for row, y in enumerate(range(-40, size, step)):
-        offset = (row % 2) * (step // 2)
+    for row_idx, y in enumerate(range(-40, size, step)):
+        offset = (row_idx % 2) * (step // 2)
         for x in range(-40 + offset, size, step):
             od.text((x, y), "$", font=font, fill=(255, 255, 255, 30))
     img.paste(overlay, (0, 0), overlay)
@@ -62,44 +72,44 @@ def _draw_pattern(img, size):
 
 def _circle_symbol(draw, cx, cy, r, symbol, font):
     draw.ellipse([cx - r, cy - r, cx + r, cy + r], fill=(60, 60, 70))
-    bbox = draw.textbbox((0, 0), symbol, font=font)
-    tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
-    draw.text((cx - tw / 2 - bbox[0], cy - th / 2 - bbox[1]),
-              symbol, font=font, fill=(255, 255, 255))
+    # anchor="mm" — центр символа точно в (cx, cy)
+    draw.text((cx, cy), symbol, font=font, fill=(255, 255, 255), anchor="mm")
 
 
 def _swap_icon(draw, cx, cy, r, ss):
-    """Две стрелки вверх/вниз в кружке."""
-    draw.ellipse([cx - r, cy - r, cx + r, cy + r], fill=(230, 235, 245))
-    # Верхняя стрелка вниз
-    ax = cx - 14 * ss
-    draw.line([(ax, cy - 18 * ss), (ax, cy + 18 * ss)],
-              fill=(70, 110, 210), width=4 * ss)
+    """Две стрелки ↑↓ в кружке."""
+    draw.ellipse([cx - r, cy - r, cx + r, cy + r], fill=(220, 230, 245))
+    color = (60, 100, 200)
+    w = 5 * ss
+    off = 12 * ss
+    arr = 9 * ss
+    hlen = 18 * ss
+    # Левая стрелка вниз
+    ax = cx - off
+    draw.line([(ax, cy - hlen), (ax, cy + hlen)], fill=color, width=w)
     draw.polygon([
-        (ax - 8 * ss, cy + 10 * ss),
-        (ax + 8 * ss, cy + 10 * ss),
-        (ax, cy + 22 * ss),
-    ], fill=(70, 110, 210))
-    # Нижняя стрелка вверх
-    ax = cx + 14 * ss
-    draw.line([(ax, cy - 18 * ss), (ax, cy + 18 * ss)],
-              fill=(70, 110, 210), width=4 * ss)
+        (ax - arr, cy + hlen - arr),
+        (ax + arr, cy + hlen - arr),
+        (ax, cy + hlen + arr),
+    ], fill=color)
+    # Правая стрелка вверх
+    ax = cx + off
+    draw.line([(ax, cy - hlen), (ax, cy + hlen)], fill=color, width=w)
     draw.polygon([
-        (ax - 8 * ss, cy - 10 * ss),
-        (ax + 8 * ss, cy - 10 * ss),
-        (ax, cy - 22 * ss),
-    ], fill=(70, 110, 210))
+        (ax - arr, cy - hlen + arr),
+        (ax + arr, cy - hlen + arr),
+        (ax, cy - hlen - arr),
+    ], fill=color)
 
 
 def generate_card(from_code: str, from_amount: float,
                   to_code: str, to_amount: float,
                   base_size: int = 512) -> BytesIO:
     """
-    Рисует квадратную карточку конвертации, похожую на @send.
-    Возвращает BytesIO с PNG.
+    Квадратная карточка конвертации в стиле @send.
     """
-    SS = 2                       # supersampling для сглаживания
-    S = base_size * SS           # внутренний размер
+    SS = 2                       # supersampling
+    S = base_size * SS
 
     img = Image.new("RGB", (S, S), (40, 110, 200))
     _draw_gradient(img, (72, 155, 235), (35, 80, 170))
@@ -117,35 +127,40 @@ def generate_card(from_code: str, from_amount: float,
 
     draw = ImageDraw.Draw(img)
 
-    f_code = _load_font(46 * SS)
-    f_amount = _load_font(60 * SS)
-    f_sym = _load_font(50 * SS)
-
     left = margin + 55 * SS
     right = S - margin - 55 * SS
     top_y = margin + 115 * SS
     bot_y = S - margin - 115 * SS
 
-    def row(code, amount, y):
-        r = 46 * SS
-        cx = left + r
-        _circle_symbol(draw, cx, y, r,
-                       CURRENCY_SYMBOLS.get(code, code[:1]), f_sym)
-        tx = cx + r + 32 * SS
-        bbox = draw.textbbox((0, 0), code, font=f_code)
-        th = bbox[3] - bbox[1]
-        draw.text((tx, y - th / 2 - bbox[1]),
-                  code, font=f_code, fill=(30, 30, 40))
+    r = 46 * SS
+    circle_cx = left + r
+    code_x = circle_cx + r + 30 * SS
+    amount_max_w = right - code_x - 30 * SS   # сколько места остаётся под сумму
+
+    f_code = _load_font(46 * SS)
+    f_sym = _load_font(50 * SS)
+
+    def row(code: str, amount: float, y: int):
+        _circle_symbol(
+            draw, circle_cx, y, r,
+            CURRENCY_SYMBOLS.get(code, code[:1]), f_sym,
+        )
+        # Код валюты — выравнивание по левому краю на уровне центра
+        draw.text((code_x, y), code, font=f_code,
+                  fill=(30, 30, 40), anchor="lm")
+
+        # Сумма — выравнивание по правому краю на уровне центра,
+        # шрифт автоматически уменьшается, если не влезает
         text = _fmt(amount)
-        bbox = draw.textbbox((0, 0), text, font=f_amount)
-        tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
-        draw.text((right - tw - bbox[0], y - th / 2 - bbox[1]),
-                  text, font=f_amount, fill=(30, 30, 40))
+        f_amount = _fit_font(text, amount_max_w, 60 * SS, 30 * SS)
+        draw.text((right, y), text, font=f_amount,
+                  fill=(30, 30, 40), anchor="rm")
 
     row(from_code, from_amount, top_y)
     row(to_code, to_amount, bot_y)
-    _swap_icon(draw, (margin + (S - margin)) // 2,
-               (top_y + bot_y) // 2, 32 * SS, SS)
+
+    # Иконка swap по центру между строками
+    _swap_icon(draw, S // 2, (top_y + bot_y) // 2, 34 * SS, SS)
 
     img = img.resize((base_size, base_size), Image.LANCZOS)
 
