@@ -15,10 +15,11 @@ from telegram.ext import (
 from rates import get_rates, get_history, format_chart, flag, format_number
 from receipt import ocr_space, ocr_tesseract, parse_receipt, parse_manual
 from storage import load_subs, save_subs
+from card import generate_card
 
 # ---------- Конфиг ----------
 TOKEN = os.environ.get("BOT_TOKEN", "")
-WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "")  # Render задаёт сам
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "")
 PORT = int(os.environ.get("PORT", 10000))
 OCRSPACE_KEY = os.environ.get("OCRSPACE_KEY", "helloworld")
 
@@ -144,6 +145,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "`@ваш_бот 100 USD RUB` — конвертация\n"
         "`@ваш_бот USD` — курс к рублю\n"
         "`@ваш_бот USD 7` — график за 7 дней\n\n"
+        "🖼 Красивая карточка конвертации:\n"
+        "`/convert 100 USD RUB`\n\n"
         "🔔 Подписки (здесь, в личке):\n"
         "`/subscribe USD > 95` — уведомить, когда выше 95\n"
         "`/subscribe USD < 90` — когда ниже 90\n"
@@ -170,6 +173,48 @@ async def chart_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Не удалось получить историю 😔")
         return
     await update.message.reply_text(format_chart(code, hist))
+
+
+async def convert_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """ /convert 100 USD RUB — конвертация с картинкой-карточкой. """
+    if not context.args:
+        await update.message.reply_text(
+            "Использование:\n"
+            "`/convert 100 USD RUB`\n"
+            "`/convert 100 USD` — в RUB",
+            parse_mode="Markdown",
+        )
+        return
+
+    parsed = parse_manual(" ".join(context.args))
+    if not parsed:
+        await update.message.reply_text(
+            "Не понял формат 🤔 Пример: `/convert 100 USD RUB`",
+            parse_mode="Markdown",
+        )
+        return
+
+    amount, cur, to_cur = parsed
+    rates = get_rates()
+    if not rates or cur not in rates or to_cur not in rates:
+        await update.message.reply_text("Не знаю такую валюту 😔")
+        return
+
+    result = amount * rates[cur] / rates[to_cur]
+
+    try:
+        buf = generate_card(cur, amount, to_cur, result)
+        caption = (
+            f"{flag(cur)} {format_number(amount)} {cur} = "
+            f"{flag(to_cur)} {format_number(result)} {to_cur}"
+        )
+        await update.message.reply_photo(photo=buf, caption=caption)
+    except Exception as e:
+        logging.exception(f"card generation failed: {e}")
+        await update.message.reply_text(
+            f"{flag(cur)} {format_number(amount)} {cur} = "
+            f"{flag(to_cur)} {format_number(result)} {to_cur}"
+        )
 
 
 async def subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -438,6 +483,7 @@ def main():
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("chart", chart_cmd))
+    app.add_handler(CommandHandler("convert", convert_cmd))
     app.add_handler(CommandHandler("subscribe", subscribe))
     app.add_handler(CommandHandler("unsubscribe", unsubscribe))
     app.add_handler(CommandHandler("mysubs", mysubs))
@@ -450,13 +496,12 @@ def main():
         MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text)
     )
 
-    # Webhook-режим для Render. Если WEBHOOK_URL не задан — polling для локалки.
     if WEBHOOK_URL:
         print(f"Запуск webhook на {WEBHOOK_URL}, порт {PORT}")
         app.run_webhook(
             listen="0.0.0.0",
             port=PORT,
-            url_path=TOKEN,           # Telegram шлёт POST на /<TOKEN>
+            url_path=TOKEN,
             webhook_url=f"{WEBHOOK_URL}/{TOKEN}",
             drop_pending_updates=True,
         )
