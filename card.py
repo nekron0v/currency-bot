@@ -16,6 +16,16 @@ CURRENCY_SYMBOLS = {
     "AUD": "A$", "PLN": "zl", "INR": "₹", "KRW": "₩",
 }
 
+# ---------- Палитра (фиолетовые тона, отличные от @send) ----------
+GRADIENT_TOP = (124, 58, 237)      # насыщенный violet
+GRADIENT_BOTTOM = (49, 30, 100)    # глубокий indigo
+PATTERN_COLOR = (255, 255, 255, 30)
+CIRCLE_BG = (30, 27, 55)           # тёмный кружок под символ
+CIRCLE_FG = (255, 255, 255)
+TEXT_COLOR = (25, 22, 45)
+SWAP_BG = (228, 220, 250)
+SWAP_FG = (90, 60, 200)
+
 
 def _load_font(size: int):
     for p in BOLD_PATHS:
@@ -35,13 +45,16 @@ def _fmt(x: float) -> str:
     return f"{x:.4f}".rstrip("0").rstrip(".").replace(".", ",")
 
 
-def _fit_font(text: str, max_width: int, start_size: int, min_size: int = 24):
-    """Подбирает размер шрифта так, чтобы text влез в max_width."""
+def _text_width(text: str, font) -> int:
+    bbox = font.getbbox(text)
+    return bbox[2] - bbox[0]
+
+
+def _fit_font(text: str, max_width: int, start_size: int, min_size: int):
     size = start_size
     while size > min_size:
         f = _load_font(size)
-        bbox = f.getbbox(text)
-        if bbox[2] - bbox[0] <= max_width:
+        if _text_width(text, f) <= max_width:
             return f
         size -= 4
     return _load_font(min_size)
@@ -66,20 +79,18 @@ def _draw_pattern(img, size):
     for row_idx, y in enumerate(range(-40, size, step)):
         offset = (row_idx % 2) * (step // 2)
         for x in range(-40 + offset, size, step):
-            od.text((x, y), "$", font=font, fill=(255, 255, 255, 30))
+            od.text((x, y), "$", font=font, fill=PATTERN_COLOR)
     img.paste(overlay, (0, 0), overlay)
 
 
 def _circle_symbol(draw, cx, cy, r, symbol, font):
-    draw.ellipse([cx - r, cy - r, cx + r, cy + r], fill=(60, 60, 70))
-    # anchor="mm" — центр символа точно в (cx, cy)
-    draw.text((cx, cy), symbol, font=font, fill=(255, 255, 255), anchor="mm")
+    draw.ellipse([cx - r, cy - r, cx + r, cy + r], fill=CIRCLE_BG)
+    draw.text((cx, cy), symbol, font=font, fill=CIRCLE_FG, anchor="mm")
 
 
 def _swap_icon(draw, cx, cy, r, ss):
-    """Две стрелки ↑↓ в кружке."""
-    draw.ellipse([cx - r, cy - r, cx + r, cy + r], fill=(220, 230, 245))
-    color = (60, 100, 200)
+    draw.ellipse([cx - r, cy - r, cx + r, cy + r], fill=SWAP_BG)
+    color = SWAP_FG
     w = 5 * ss
     off = 12 * ss
     arr = 9 * ss
@@ -105,17 +116,13 @@ def _swap_icon(draw, cx, cy, r, ss):
 def generate_card(from_code: str, from_amount: float,
                   to_code: str, to_amount: float,
                   base_size: int = 512) -> BytesIO:
-    """
-    Квадратная карточка конвертации в стиле @send.
-    """
-    SS = 2                       # supersampling
+    SS = 2
     S = base_size * SS
 
-    img = Image.new("RGB", (S, S), (40, 110, 200))
-    _draw_gradient(img, (72, 155, 235), (35, 80, 170))
+    img = Image.new("RGB", (S, S), GRADIENT_TOP)
+    _draw_gradient(img, GRADIENT_TOP, GRADIENT_BOTTOM)
     _draw_pattern(img, S)
 
-    # Белая карточка
     card = Image.new("RGBA", (S, S), (0, 0, 0, 0))
     cd = ImageDraw.Draw(card)
     margin = 40 * SS
@@ -135,31 +142,31 @@ def generate_card(from_code: str, from_amount: float,
     r = 46 * SS
     circle_cx = left + r
     code_x = circle_cx + r + 30 * SS
-    amount_max_w = right - code_x - 30 * SS   # сколько места остаётся под сумму
 
-    f_code = _load_font(46 * SS)
     f_sym = _load_font(50 * SS)
+    f_code = _load_font(46 * SS)
 
     def row(code: str, amount: float, y: int):
-        _circle_symbol(
-            draw, circle_cx, y, r,
-            CURRENCY_SYMBOLS.get(code, code[:1]), f_sym,
-        )
-        # Код валюты — выравнивание по левому краю на уровне центра
-        draw.text((code_x, y), code, font=f_code,
-                  fill=(30, 30, 40), anchor="lm")
+        _circle_symbol(draw, circle_cx, y, r,
+                       CURRENCY_SYMBOLS.get(code, code[:1]), f_sym)
 
-        # Сумма — выравнивание по правому краю на уровне центра,
-        # шрифт автоматически уменьшается, если не влезает
+        # --- Код валюты: рисуем и измеряем реальную ширину ---
+        code_w = _text_width(code, f_code)
+        draw.text((code_x, y), code, font=f_code,
+                  fill=TEXT_COLOR, anchor="lm")
+
+        # --- Сколько места осталось под сумму (с отступом 24px) ---
+        amount_max_w = right - (code_x + code_w) - 24 * SS
+
+        # --- Сумма: автоподбор размера, выравнивание по правому краю ---
         text = _fmt(amount)
-        f_amount = _fit_font(text, amount_max_w, 60 * SS, 30 * SS)
+        f_amount = _fit_font(text, amount_max_w, 60 * SS, 22 * SS)
         draw.text((right, y), text, font=f_amount,
-                  fill=(30, 30, 40), anchor="rm")
+                  fill=TEXT_COLOR, anchor="rm")
 
     row(from_code, from_amount, top_y)
     row(to_code, to_amount, bot_y)
 
-    # Иконка swap по центру между строками
     _swap_icon(draw, S // 2, (top_y + bot_y) // 2, 34 * SS, SS)
 
     img = img.resize((base_size, base_size), Image.LANCZOS)

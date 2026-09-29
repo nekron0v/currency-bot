@@ -1,10 +1,17 @@
 import logging
 import os
 import time
+from contextlib import asynccontextmanager
 from datetime import time as dtime, timezone, timedelta
 
+import uvicorn
+from starlette.applications import Starlette
+from starlette.responses import Response
+from starlette.routing import Route
+
 from telegram import (
-    Update, InlineQueryResultArticle, InputTextMessageContent,
+    Update, InlineQueryResultArticle, InlineQueryResultPhoto,
+    InputTextMessageContent,
     InlineKeyboardButton, InlineKeyboardMarkup,
 )
 from telegram.ext import (
@@ -19,7 +26,7 @@ from card import generate_card
 
 # ---------- Конфиг ----------
 TOKEN = os.environ.get("BOT_TOKEN", "")
-WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "")
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "").rstrip("/")
 PORT = int(os.environ.get("PORT", 10000))
 OCRSPACE_KEY = os.environ.get("OCRSPACE_KEY", "helloworld")
 
@@ -56,6 +63,11 @@ def build_receipt_result(amount, cur, rates):
     )
 
 
+def _card_url(amount, frm, to) -> str:
+    amount_str = f"{amount:g}".replace(",", ".")
+    return f"{WEBHOOK_URL}/card/{amount_str}/{frm}/{to}.png"
+
+
 # ---------- Inline ----------
 async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.inline_query.query.strip().upper()
@@ -81,8 +93,26 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"{flag(f)} {format_number(amount)} {f} "
             f"= {flag(t)} {format_number(res)} {t}"
         )
+
+        # 1) Картинка-карточка (первая в списке)
+        if WEBHOOK_URL:
+            card_url = _card_url(amount, f, t)
+            results.append(InlineQueryResultPhoto(
+                id="card",
+                photo_url=card_url,
+                thumbnail_url=card_url,
+                title=text,
+                description="Карточка конвертации",
+                caption=text,
+                photo_width=512,
+                photo_height=512,
+            ))
+
+        # 2) Обычный текст (тоже доступен)
         results.append(InlineQueryResultArticle(
-            id="conv", title=text, description="Отправить в чат",
+            id="conv_text",
+            title=text,
+            description="Отправить текстом",
             input_message_content=InputTextMessageContent(message_text=text),
         ))
 
@@ -124,7 +154,7 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         hint = (
             "💱 Подсказка:\n"
-            "• 100 USD RUB — конвертация\n"
+            "• 100 USD RUB — карточка + текст\n"
             "• USD — курс к рублю\n"
             "• USD 7 — график за 7 дней"
         )
@@ -142,12 +172,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "👋 Я бот-курсы валют.\n\n"
         "📌 Inline (в любом чате):\n"
-        "`@ваш_бот 100 USD RUB` — конвертация\n"
+        "`@ваш_бот 100 USD RUB` — карточка конвертации\n"
         "`@ваш_бот USD` — курс к рублю\n"
         "`@ваш_бот USD 7` — график за 7 дней\n\n"
-        "🖼 Красивая карточка конвертации:\n"
+        "🖼 Карточка в личке:\n"
         "`/convert 100 USD RUB`\n\n"
-        "🔔 Подписки (здесь, в личке):\n"
+        "🔔 Подписки (в личке):\n"
         "`/subscribe USD > 95` — уведомить, когда выше 95\n"
         "`/subscribe USD < 90` — когда ниже 90\n"
         "/mysubs — список\n"
@@ -155,7 +185,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "☀️ Утренняя сводка:\n"
         "/digest_on — включить (в 9:00 МСК)\n"
         "/digest_off — выключить\n\n"
-        "🖼 Отправьте фото чека — распознаю сумму и конвертирую.",
+        "🧾 Отправьте фото чека — распознаю сумму.",
         parse_mode="Markdown",
     )
 
@@ -176,7 +206,6 @@ async def chart_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def convert_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """ /convert 100 USD RUB — конвертация с картинкой-карточкой. """
     if not context.args:
         await update.message.reply_text(
             "Использование:\n"
@@ -454,7 +483,7 @@ async def send_daily_digest(context: ContextTypes.DEFAULT_TYPE):
             lines.append(
                 f"{flag(code)} 1 {code} = {format_number(rates[code])} RUB"
             )
-    lines.append("\n💡 @ваш_бот 100 USD RUB — конвертация")
+    lines.append("\n💡 @ваш_бот 100 USD RUB — карточка конвертации")
     text = "\n".join(lines)
     for chat_id in subs["digests"]:
         try:
@@ -463,7 +492,7 @@ async def send_daily_digest(context: ContextTypes.DEFAULT_TYPE):
             logging.error(f"digest to {chat_id}: {e}")
 
 
-# ---------- Запуск ----------
+# ---------- Сборка приложения ----------
 async def post_init(app: Application):
     app.job_queue.run_repeating(
         check_subscriptions, interval=CHECK_INTERVAL, first=10
@@ -474,13 +503,8 @@ async def post_init(app: Application):
     )
 
 
-def main():
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(message)s",
-    )
+def build_ptb_app() -> Application:
     app = Application.builder().token(TOKEN).post_init(post_init).build()
-
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("chart", chart_cmd))
     app.add_handler(CommandHandler("convert", convert_cmd))
@@ -495,19 +519,86 @@ def main():
     app.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text)
     )
+    return app
+
+
+def build_star_app(ptb_app: Application) -> Starlette:
+    async def telegram_webhook(request):
+        data = await request.json()
+        update = Update.de_json(data, ptb_app.bot)
+        await ptb_app.process_update(update)
+        return Response("ok")
+
+    async def card_endpoint(request):
+        amount_s = request.path_params["amount"]
+        frm = request.path_params["from_code"].upper()
+        to = request.path_params["to_code"].upper()
+        try:
+            amount = float(amount_s.replace(",", "."))
+        except ValueError:
+            return Response("bad amount", status_code=400)
+        rates = get_rates()
+        if not rates or frm not in rates or to not in rates:
+            return Response("bad currency", status_code=400)
+        result = amount * rates[frm] / rates[to]
+        try:
+            buf = generate_card(frm, amount, to, result)
+        except Exception as e:
+            logging.exception(f"card endpoint: {e}")
+            return Response("card error", status_code=500)
+        return Response(
+            buf.read(),
+            media_type="image/png",
+            headers={"Cache-Control": "public, max-age=600"},
+        )
+
+    async def health(request):
+        return Response("ok")
+
+    @asynccontextmanager
+    async def lifespan(starlette_app):
+        await ptb_app.initialize()
+        await ptb_app.start()
+        await ptb_app.bot.set_webhook(
+            url=f"{WEBHOOK_URL}/{TOKEN}",
+            drop_pending_updates=True,
+            allowed_updates=Update.ALL_TYPES,
+        )
+        logging.info(f"Set webhook to {WEBHOOK_URL}/{TOKEN}")
+        try:
+            yield
+        finally:
+            try:
+                await ptb_app.bot.delete_webhook()
+            except Exception:
+                pass
+            await ptb_app.stop()
+            await ptb_app.shutdown()
+
+    return Starlette(
+        routes=[
+            Route(f"/{TOKEN}", telegram_webhook, methods=["POST"]),
+            Route("/card/{amount}/{from_code}/{to_code}.png", card_endpoint),
+            Route("/", health),
+        ],
+        lifespan=lifespan,
+    )
+
+
+def main():
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+    )
+    ptb_app = build_ptb_app()
 
     if WEBHOOK_URL:
         print(f"Запуск webhook на {WEBHOOK_URL}, порт {PORT}")
-        app.run_webhook(
-            listen="0.0.0.0",
-            port=PORT,
-            url_path=TOKEN,
-            webhook_url=f"{WEBHOOK_URL}/{TOKEN}",
-            drop_pending_updates=True,
-        )
+        star_app = build_star_app(ptb_app)
+        uvicorn.run(star_app, host="0.0.0.0", port=PORT, log_level="info")
     else:
         print("WEBHOOK_URL не задан — запуск polling (только для локальной разработки)")
-        app.run_polling()
+        ptb_app.run_polling()
 
 
 if __name__ == "__main__":
