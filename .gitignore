@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.env
+subscriptions.json
+venv/
+.venv/
+*.log
