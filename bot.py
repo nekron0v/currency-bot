@@ -564,22 +564,36 @@ def build_star_app(ptb_app: Application) -> Starlette:
     async def lifespan(starlette_app):
         await ptb_app.initialize()
         await ptb_app.start()
+
         url = f"{WEBHOOK_URL}{WEBHOOK_PATH}"
+        # Сбрасываем возможный старый webhook у Telegram (с другого контейнера),
+        # затем ставим свой. drop_pending_updates=False — чтобы доставить
+        # сообщения, накопившиеся пока бот был офлайн.
+        try:
+            await ptb_app.bot.delete_webhook(drop_pending_updates=False)
+        except Exception as e:
+            logging.warning(f"delete_webhook before set: {e}")
+
         await ptb_app.bot.set_webhook(
             url=url,
-            drop_pending_updates=True,
+            drop_pending_updates=False,
             allowed_updates=Update.ALL_TYPES,
         )
         logging.info(f"Set webhook to {url}")
+
         try:
             yield
         finally:
+            # НЕ вызываем delete_webhook — иначе при следующем деплое
+            # старый контейнер снесёт URL, установленный новым.
             try:
-                await ptb_app.bot.delete_webhook()
+                await ptb_app.stop()
             except Exception:
                 pass
-            await ptb_app.stop()
-            await ptb_app.shutdown()
+            try:
+                await ptb_app.shutdown()
+            except Exception:
+                pass
 
     return Starlette(
         routes=[
