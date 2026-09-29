@@ -1,4 +1,4 @@
-python-telegram-bot[job-queue]==21.6
+python-telegram-bot[job-queue,webhooks]==21.6
 requests==2.32.3
 uvicorn==0.32.0
 starlette==0.41.2
