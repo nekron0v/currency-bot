@@ -94,7 +94,6 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"= {flag(t)} {format_number(res)} {t}"
         )
 
-        # 1) Картинка-карточка (первая в списке)
         if WEBHOOK_URL:
             card_url = _card_url(amount, f, t)
             results.append(InlineQueryResultPhoto(
@@ -108,7 +107,6 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 photo_height=512,
             ))
 
-        # 2) Обычный текст (тоже доступен)
         results.append(InlineQueryResultArticle(
             id="conv_text",
             title=text,
@@ -523,8 +521,15 @@ def build_ptb_app() -> Application:
 
 
 def build_star_app(ptb_app: Application) -> Starlette:
+    WEBHOOK_PATH = "/webhook"
+
     async def telegram_webhook(request):
-        data = await request.json()
+        logging.info("→ Webhook request received")
+        try:
+            data = await request.json()
+        except Exception as e:
+            logging.exception(f"webhook: не смог прочитать JSON: {e}")
+            return Response("bad json", status_code=400)
         update = Update.de_json(data, ptb_app.bot)
         await ptb_app.process_update(update)
         return Response("ok")
@@ -559,12 +564,13 @@ def build_star_app(ptb_app: Application) -> Starlette:
     async def lifespan(starlette_app):
         await ptb_app.initialize()
         await ptb_app.start()
+        url = f"{WEBHOOK_URL}{WEBHOOK_PATH}"
         await ptb_app.bot.set_webhook(
-            url=f"{WEBHOOK_URL}/{TOKEN}",
+            url=url,
             drop_pending_updates=True,
             allowed_updates=Update.ALL_TYPES,
         )
-        logging.info(f"Set webhook to {WEBHOOK_URL}/{TOKEN}")
+        logging.info(f"Set webhook to {url}")
         try:
             yield
         finally:
@@ -577,7 +583,7 @@ def build_star_app(ptb_app: Application) -> Starlette:
 
     return Starlette(
         routes=[
-            Route(f"/{TOKEN}", telegram_webhook, methods=["POST"]),
+            Route(WEBHOOK_PATH, telegram_webhook, methods=["POST"]),
             Route("/card/{amount}/{from_code}/{to_code}.png", card_endpoint),
             Route("/", health),
         ],
