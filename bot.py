@@ -38,12 +38,33 @@ DIGEST_CODES = ["USD", "EUR", "CNY", "KZT", "TRY"]
 PENDING = {}
 PENDING_TTL = 600
 MSK = timezone(timedelta(hours=3))
-
-# Версия карточки — увеличивайте при смене дизайна, чтобы Telegram перекачал
 CARD_VERSION = 3
 
 if not TOKEN:
     raise SystemExit("BOT_TOKEN не задан в переменных окружения")
+
+
+# ---------- Символы валют → коды ----------
+SYMBOL_TO_CODE = {
+    "$": "USD", "€": "EUR", "₽": "RUB", "£": "GBP",
+    "¥": "JPY", "₸": "KZT", "₺": "TRY", "₴": "UAH",
+    "₹": "INR", "₩": "KRW", "₪": "ILS", "₫": "VND",
+    "₣": "CHF",
+}
+
+
+def _resolve_currency(token: str):
+    """'$' → 'USD', 'usd' → 'USD', 'RUB' → 'RUB'. None если не знаем."""
+    if not token:
+        return None
+    t = token.strip()
+    # Символьные обозначения — до upper(), потому что $ и € регистронезависимы
+    if t in SYMBOL_TO_CODE:
+        return SYMBOL_TO_CODE[t]
+    t_up = t.upper()
+    if t_up in SYMBOL_TO_CODE:
+        return SYMBOL_TO_CODE[t_up]
+    return t_up if len(t_up) == 3 and t_up.isalpha() else None
 
 
 # ---------- Помощники ----------
@@ -73,24 +94,26 @@ def _card_url(amount, frm, to) -> str:
 
 # ---------- Inline ----------
 async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.inline_query.query.strip().upper()
-    parts = query.split()
+    parts = update.inline_query.query.strip().split()
     rates = get_rates()
     if not rates:
         await update.inline_query.answer([], cache_time=60)
         return
     results = []
 
+    # ---------- 1) Конвертация: "10 USD RUB", "10 $ ₽", "10 USD ₽" ----------
     if len(parts) == 3:
         try:
             amount = float(parts[0].replace(",", "."))
         except ValueError:
             await update.inline_query.answer([], cache_time=60)
             return
-        f, t = parts[1], parts[2]
-        if f not in rates or t not in rates:
+        f = _resolve_currency(parts[1])
+        t = _resolve_currency(parts[2])
+        if not f or not t or f not in rates or t not in rates:
             await update.inline_query.answer([], cache_time=60)
             return
+
         res = amount * rates[f] / rates[t]
         text = (
             f"{flag(f)} {format_number(amount)} {f} "
@@ -110,15 +133,13 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 photo_height=450,
             ))
 
-        results.append(InlineQueryResultArticle(
-            id="conv_text",
-            title=text,
-            description="Отправить текстом",
-            input_message_content=InputTextMessageContent(message_text=text),
-        ))
+    # ---------- 2) Одна валюта: "USD" или "$" → курс к рублю ----------
+    elif len(parts) == 1:
+        code = _resolve_currency(parts[0])
+        if not code or code not in rates:
+            await update.inline_query.answer([], cache_time=60)
+            return
 
-    elif len(parts) == 1 and parts[0] in rates:
-        code = parts[0]
         text = f"{flag(code)} 1 {code} = {format_number(rates[code])} RUB 🇷🇺"
         results.append(InlineQueryResultArticle(
             id="single", title=text, description="Курс к рублю",
@@ -137,11 +158,20 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 input_message_content=InputTextMessageContent(message_text=line),
             ))
 
-    elif len(parts) == 2 and parts[0] in rates and (
-        parts[1] == "CHART" or parts[1].isdigit()
-    ):
-        code = parts[0]
-        days = 7 if parts[1] == "CHART" else min(int(parts[1]), 30)
+    # ---------- 3) График: "USD 7" или "$ 7" ----------
+    elif len(parts) == 2:
+        code = _resolve_currency(parts[0])
+        if not code or code not in rates:
+            await update.inline_query.answer([], cache_time=60)
+            return
+        token = parts[1].upper()
+        if token == "CHART":
+            days = 7
+        elif token.isdigit():
+            days = min(int(token), 30)
+        else:
+            await update.inline_query.answer([], cache_time=60)
+            return
         hist = get_history(code, days)
         if len(hist) >= 2:
             text = format_chart(code, hist)
@@ -152,20 +182,21 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 input_message_content=InputTextMessageContent(message_text=text),
             ))
 
+    # ---------- 4) Подсказка ----------
     else:
         hint = (
             "💱 Подсказка:\n"
-            "• 100 USD RUB — карточка + текст\n"
-            "• USD — курс к рублю\n"
+            "• 100 USD RUB — карточка\n"
+            "• 100 $ ₽ — то же самое\n"
+            "• USD или $ — курс к рублю\n"
             "• USD 7 — график за 7 дней"
         )
         results.append(InlineQueryResultArticle(
-            id="hint", title="💱 Введите: 100 USD RUB",
-            description="или USD, или USD 7",
+            id="hint", title="💱 Введите: 100 $ ₽",
+            description="или USD RUB, USD, USD 7",
             input_message_content=InputTextMessageContent(message_text=hint),
         ))
 
-    # cache_time=1 — чтобы изменения дизайна в inline-превью были видны сразу
     await update.inline_query.answer(results, cache_time=1)
 
 
@@ -174,8 +205,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "👋 Я бот-курсы валют.\n\n"
         "📌 Inline (в любом чате):\n"
-        "`@ваш_бот 100 USD RUB` — карточка конвертации\n"
-        "`@ваш_бот USD` — курс к рублю\n"
+        "`@ваш_бот 100 USD RUB` — карточка\n"
+        "`@ваш_бот 100 $ ₽` — то же самое\n"
+        "`@ваш_бот $` — курс к рублю\n"
         "`@ваш_бот USD 7` — график за 7 дней\n\n"
         "🖼 Карточка в личке:\n"
         "`/convert 100 USD RUB`\n\n"
@@ -212,15 +244,37 @@ async def convert_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             "Использование:\n"
             "`/convert 100 USD RUB`\n"
+            "`/convert 100 $ ₽`\n"
             "`/convert 100 USD` — в RUB",
             parse_mode="Markdown",
         )
         return
 
-    parsed = parse_manual(" ".join(context.args))
+    raw = " ".join(context.args)
+    # Сначала пробуем с символами ($ ₽), затем с кодами
+    parsed = parse_manual(raw)
+    if not parsed:
+        tokens = raw.split()
+        if len(tokens) == 2:
+            try:
+                amount = float(tokens[0].replace(",", "."))
+                code = _resolve_currency(tokens[1]) or "RUB"
+                parsed = (amount, code, "RUB")
+            except ValueError:
+                parsed = None
+        elif len(tokens) == 3:
+            try:
+                amount = float(tokens[0].replace(",", "."))
+                f = _resolve_currency(tokens[1])
+                t = _resolve_currency(tokens[2])
+                if f and t:
+                    parsed = (amount, f, t)
+            except ValueError:
+                parsed = None
+
     if not parsed:
         await update.message.reply_text(
-            "Не понял формат 🤔 Пример: `/convert 100 USD RUB`",
+            "Не понял формат 🤔 Пример: `/convert 100 USD RUB` или `/convert 100 $ ₽`",
             parse_mode="Markdown",
         )
         return
@@ -403,7 +457,7 @@ async def on_fix(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_text(
         "✏️ Напишите сумму и валюту:\n"
         "`120 USD`\n"
-        "`120 USD EUR`\n"
+        "`120 $ ₽`\n"
         "`120` — по умолчанию RUB",
         parse_mode="Markdown",
     )
@@ -415,10 +469,36 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if uid not in PENDING:
         return
 
-    parsed = parse_manual(update.message.text or "")
+    raw = (update.message.text or "").strip()
+    parsed = parse_manual(raw)
+    if not parsed:
+        tokens = raw.split()
+        if len(tokens) == 1:
+            try:
+                parsed = (float(tokens[0].replace(",", ".")), "RUB", "RUB")
+            except ValueError:
+                parsed = None
+        elif len(tokens) == 2:
+            try:
+                amount = float(tokens[0].replace(",", "."))
+                code = _resolve_currency(tokens[1]) or "RUB"
+                parsed = (amount, code, "RUB")
+            except ValueError:
+                parsed = None
+        elif len(tokens) == 3:
+            try:
+                amount = float(tokens[0].replace(",", "."))
+                f = _resolve_currency(tokens[1])
+                t = _resolve_currency(tokens[2])
+                if f and t:
+                    parsed = (amount, f, t)
+            except ValueError:
+                parsed = None
+
     if not parsed:
         await update.message.reply_text(
-            "Не понял 🤔 Пример: `120 USD`", parse_mode="Markdown"
+            "Не понял 🤔 Пример: `120 USD` или `120 $ ₽`",
+            parse_mode="Markdown",
         )
         return
 
@@ -485,7 +565,7 @@ async def send_daily_digest(context: ContextTypes.DEFAULT_TYPE):
             lines.append(
                 f"{flag(code)} 1 {code} = {format_number(rates[code])} RUB"
             )
-    lines.append("\n💡 @ваш_бот 100 USD RUB — карточка конвертации")
+    lines.append("\n💡 @ваш_бот 100 $ ₽ — карточка конвертации")
     text = "\n".join(lines)
     for chat_id in subs["digests"]:
         try:
