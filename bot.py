@@ -38,7 +38,7 @@ DIGEST_CODES = ["USD", "EUR", "CNY", "KZT", "TRY"]
 PENDING = {}
 PENDING_TTL = 600
 MSK = timezone(timedelta(hours=3))
-CARD_VERSION = 5
+CARD_VERSION = 6
 
 
 if not TOKEN:
@@ -93,6 +93,19 @@ def _chart_url(code, days) -> str:
     return f"{WEBHOOK_URL}/chart/{code}/{days}.png?v={CARD_VERSION}"
 
 
+def _photo(card_url, text, id_):
+    return InlineQueryResultPhoto(
+        id=id_,
+        photo_url=card_url,
+        thumbnail_url=card_url,
+        title=text,
+        description="Карточка конвертации",
+        caption=text,
+        photo_width=720,
+        photo_height=450,
+    )
+
+
 def _png_response(buf):
     return Response(
         buf.read(),
@@ -133,47 +146,40 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"= {flag(t)} {format_number(res)} {t}"
         )
         if WEBHOOK_URL:
-            results.append(InlineQueryResultPhoto(
-                id="card",
-                photo_url=_card_url(amount, f, t),
-                thumbnail_url=_card_url(amount, f, t),
-                title=text, description="Карточка конвертации",
-                caption=text,
-                photo_width=720, photo_height=450,
-            ))
+            results.append(_photo(_card_url(amount, f, t), text, "card"))
 
-    # --- 2) Одна валюта: "USD" / "$" → карточка курса к RUB ---
+    # --- 2) Одна валюта: "USD" / "$" → три карточки курса ---
     elif len(parts) == 1:
         code = _resolve_currency(parts[0])
         if not code or code not in rates:
             await update.inline_query.answer([], cache_time=60)
             return
 
+        # Карточка 1: к RUB
         if code != "RUB":
-            text = f"{flag(code)} 1 {code} = {format_number(rates[code])} RUB 🇷🇺"
+            text = f"{flag(code)} 1 {code} = {format_number(rates[code])} RUB"
             if WEBHOOK_URL:
-                results.append(InlineQueryResultPhoto(
-                    id="rate",
-                    photo_url=_card_url(1, code, "RUB"),
-                    thumbnail_url=_card_url(1, code, "RUB"),
-                    title=text, description="Курс к рублю",
-                    caption=text,
-                    photo_width=720, photo_height=450,
+                results.append(_photo(
+                    _card_url(1, code, "RUB"), text, "rate_rub",
                 ))
+
+        # Карточки 2-3: кросс-курсы к USD и EUR
         for other in ("USD", "EUR"):
             if other == code:
                 continue
             cross = rates[code] / rates[other]
-            line = (
+            text = (
                 f"{flag(code)} 1 {code} = "
                 f"{format_number(cross)} {other} {flag(other)}"
             )
-            results.append(InlineQueryResultArticle(
-                id=f"x_{other}", title=line, description="Кросс-курс",
-                input_message_content=InputTextMessageContent(message_text=line),
-            ))
+            if WEBHOOK_URL:
+                results.append(_photo(
+                    _card_url(1, code, other),
+                    text,
+                    f"rate_{other.lower()}",
+                ))
 
-    # --- 3) График: "USD 7" → карточка-график ---
+    # --- 3) График: "USD 7" ---
     elif len(parts) == 2:
         code = _resolve_currency(parts[0])
         if not code or code not in rates:
@@ -194,13 +200,8 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if len(hist) >= 2:
             text = f"📊 {code} за {len(hist)} дн."
             if WEBHOOK_URL:
-                results.append(InlineQueryResultPhoto(
-                    id="chart",
-                    photo_url=_chart_url(code, days),
-                    thumbnail_url=_chart_url(code, days),
-                    title=text, description="График курса",
-                    caption=text,
-                    photo_width=720, photo_height=450,
+                results.append(_photo(
+                    _chart_url(code, days), text, "chart",
                 ))
 
     else:
@@ -232,15 +233,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "`@toycourse_bot 100 $ ₽`\n"
         "  →  то же самое, короче\n\n"
         "`@toycourse_bot $`\n"
-        "  →  курс к рублю карточкой\n\n"
+        "  →  курс к рублю + кросс-курсы\n\n"
         "`@toycourse_bot USD 7`\n"
         "  →  график за 7 дней\n\n"
 
         "━━━━━━━━━━━━━━━━━━━━━\n\n"
 
         "🖼 *Команды в личке*\n"
-        "`/convert 100 USD RUB` — карточка конвертации\n"
-        "`/chart USD 7` — график за 7 дней\n\n"
+        "`/convert 100 USD RUB` — карточка\n"
+        "`/chart USD 7` — график\n\n"
 
         "━━━━━━━━━━━━━━━━━━━━━\n\n"
 
@@ -510,15 +511,21 @@ async def on_fix(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     PENDING[update.effective_user.id] = {"ts": time.time()}
-    await query.edit_message_caption(
-        caption=(
-            "✏️ Напишите сумму и валюту:\n"
-            "`120 USD`\n"
-            "`120 $ ₽`\n"
-            "`120` — по умолчанию RUB"
-        ),
-        parse_mode="Markdown",
-    )
+    try:
+        await query.edit_message_caption(
+            caption=(
+                "✏️ Напишите сумму и валюту:\n"
+                "`120 USD`\n"
+                "`120 $ ₽`\n"
+                "`120` — по умолчанию RUB"
+            ),
+            parse_mode="Markdown",
+        )
+    except Exception:
+        await query.edit_message_text(
+            "✏️ Напишите сумму и валюту: `120 USD`",
+            parse_mode="Markdown",
+        )
 
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
