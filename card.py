@@ -93,7 +93,6 @@ def _gradient(img, top, bottom):
 
 
 def _pattern(img, W, H):
-    """Крупные $ в шахматном порядке."""
     font = _load_font(int(H * 0.15))
     layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     ld = ImageDraw.Draw(layer)
@@ -121,7 +120,6 @@ def _swap_icon(draw, cx, cy, r):
     y_top = cy - h // 2
     y_bot = cy + h // 2
 
-    # Левая стрелка — вниз
     x1 = cx - gap
     draw.line([(x1, y_top), (x1, y_bot)], fill=color, width=w)
     draw.polygon([
@@ -130,7 +128,6 @@ def _swap_icon(draw, cx, cy, r):
         (x1, y_bot + head // 2),
     ], fill=color)
 
-    # Правая стрелка — вверх
     x2 = cx + gap
     draw.line([(x2, y_top), (x2, y_bot)], fill=color, width=w)
     draw.polygon([
@@ -142,53 +139,51 @@ def _swap_icon(draw, cx, cy, r):
 
 def generate_card(from_code, from_amount, to_code, to_amount,
                   base_w=720, base_h=450):
-    """Горизонтальная карточка 720x450 (16:10), как у @send."""
+    """Горизонтальная 720x450 (16:10), пропорции выверены по @send."""
     SS = 2
     W = base_w * SS           # 1440
     H = base_h * SS           # 900
 
-    # Фон
     img = Image.new("RGB", (W, H), GRADIENT_TOP)
     _gradient(img, GRADIENT_TOP, GRADIENT_BOTTOM)
     _pattern(img, W, H)
 
     draw = ImageDraw.Draw(img)
 
-    # Карточка — те же отступы по X и Y (квадратный padding вокруг)
-    margin = int(H * 0.10)           # 90 из 900 = 10%
-    radius = int(H * 0.10)           # 90
+    # ----- Карточка (отступы X < Y, как у @send) -----
+    margin_x = int(W * 0.070)        # 100 из 1440 = 7.0%
+    margin_y = int(H * 0.142)        # 128 из 900 = 14.2%
+    radius = int(H * 0.10)
     draw.rounded_rectangle(
-        [margin, margin, W - margin, H - margin],
+        [margin_x, margin_y, W - margin_x, H - margin_y],
         radius=radius, fill=CARD_BG,
     )
 
-    # Внутренние отступы карточки
-    pad_x = int(H * 0.07)            # 63
-    inner_x0 = margin + pad_x
-    inner_x1 = W - margin - pad_x
+    # Внутренний отступ карточки
+    pad = int(H * 0.05)
+    inner_x0 = margin_x + pad
+    inner_x1 = W - margin_x - pad
 
-    # Позиции строк — 27% и 73% высоты (как у @send)
-    row1_y = int(H * 0.27)
-    row2_y = int(H * 0.73)
+    # ----- Кружок символа валюты -----
+    circle_r = int(H * 0.058)                          # 52 из 900
+    circle_cx = inner_x0 + circle_r
+    code_x = circle_cx + circle_r + int(H * 0.042)
+
+    # ----- Позиции строк -----
+    row1_y = int(H * 0.254)
+    row2_y = int(H * 0.725)
     mid_y = H // 2
 
-    # Кружок символа валюты
-    circle_r = int(H * 0.053)        # 48
-    circle_cx = inner_x0 + circle_r
-    code_x = circle_cx + circle_r + int(H * 0.045)
-
-    # Шрифты — код и сумма одинакового размера
-    f_sym = _load_font(int(H * 0.062))
-    f_code = _load_font(int(H * 0.091))
-    amount_size = int(H * 0.091)
+    # ----- Шрифты (одинаковые для кода и суммы) -----
+    f_sym = _load_font(int(H * 0.056))
+    f_code = _load_font(int(H * 0.092))
+    amount_size = int(H * 0.092)
     min_amount_size = int(H * 0.045)
 
     def row(code, amount, y):
         _circle_symbol(draw, circle_cx, y, circle_r,
                        CURRENCY_SYMBOLS.get(code, code[:1]), f_sym)
-
         code_w = _draw_lm(draw, code_x, y, code, f_code, TEXT_COLOR)
-
         text = _fmt(amount)
         avail_w = inner_x1 - (code_x + code_w) - int(H * 0.03)
         f_amount = _fit(text, avail_w, amount_size, min_amount_size)
@@ -197,7 +192,7 @@ def generate_card(from_code, from_amount, to_code, to_amount,
     row(from_code, from_amount, row1_y)
     row(to_code, to_amount, row2_y)
 
-    # Разделительная линия с прорезью под swap
+    # ----- Разделитель с прорезью под swap -----
     swap_r = int(H * 0.046)
     line_w = max(1, int(H * 0.0022))
     gap = int(H * 0.014)
@@ -208,7 +203,6 @@ def generate_card(from_code, from_amount, to_code, to_amount,
 
     _swap_icon(draw, W // 2, mid_y, swap_r)
 
-    # Ресайз со сглаживанием
     img = img.resize((base_w, base_h), Image.LANCZOS)
 
     buf = BytesIO()
