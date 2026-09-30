@@ -1,7 +1,13 @@
+import os
 import time
 import logging
 from datetime import datetime, timedelta
 import requests
+
+# Ключ ExchangeRate-API (можно переопределить через переменную окружения)
+EXCHANGE_API_KEY = os.environ.get(
+    "EXCHANGE_API_KEY", "438c515f5cefbf6cf1bcb921"
+)
 
 _cache = {"rates": None, "time": 0}
 
@@ -27,36 +33,66 @@ def format_number(x: float) -> str:
     return f"{x:.6f}".rstrip("0").rstrip(".").replace(".", ",")
 
 
+def _fetch_exchangerate_api():
+    """ExchangeRate-API v6. База — USD."""
+    if not EXCHANGE_API_KEY:
+        raise ValueError("EXCHANGE_API_KEY не задан")
+    url = f"https://v6.exchangerate-api.com/v6/{EXCHANGE_API_KEY}/latest/USD"
+    r = requests.get(url, timeout=10).json()
+    if r.get("result") != "success":
+        raise ValueError(f"ExchangeRate-API: {r.get('error-type', 'unknown')}")
+    conv = r["conversion_rates"]
+    rub = conv["RUB"]
+    rates = {c: rub / v for c, v in conv.items() if v}
+    rates["RUB"] = 1.0
+    return rates
+
+
+def _fetch_open_er():
+    r = requests.get("https://open.er-api.com/v6/latest/USD", timeout=10).json()
+    if r.get("result") != "success":
+        raise ValueError("open.er-api error")
+    rub = r["rates"]["RUB"]
+    rates = {c: rub / v for c, v in r["rates"].items()}
+    rates["RUB"] = 1.0
+    return rates
+
+
+def _fetch_cbr():
+    d = requests.get(
+        "https://www.cbr-xml-daily.ru/daily_json.js", timeout=10
+    ).json()
+    rates = {"RUB": 1.0}
+    for c, info in d["Valute"].items():
+        rates[c] = info["Value"] / info["Nominal"]
+    return rates
+
+
 def get_rates():
-    """open.er-api.com → fallback на ЦБ РФ. База — RUB."""
+    """Курсы с базой RUB. Приоритет: ExchangeRate-API → open.er → ЦБ РФ."""
     now = time.time()
     if _cache["rates"] and now - _cache["time"] < 600:
         return _cache["rates"]
-    try:
-        r = requests.get("https://open.er-api.com/v6/latest/USD", timeout=10).json()
-        if r.get("result") != "success":
-            raise ValueError("API error")
-        rub = r["rates"]["RUB"]
-        rates = {c: rub / v for c, v in r["rates"].items()}
-        rates["RUB"] = 1.0
-        _cache.update(rates=rates, time=now)
-        return rates
-    except Exception as e:
-        logging.warning(f"open.er-api fail: {e}, fallback to CBR")
-    try:
-        d = requests.get("https://www.cbr-xml-daily.ru/daily_json.js", timeout=10).json()
-        rates = {"RUB": 1.0}
-        for c, info in d["Valute"].items():
-            rates[c] = info["Value"] / info["Nominal"]
-        _cache.update(rates=rates, time=now)
-        return rates
-    except Exception as e:
-        logging.error(f"CBR fail: {e}")
-        return None
+
+    for name, fetcher in (
+        ("ExchangeRate-API", _fetch_exchangerate_api),
+        ("open.er-api", _fetch_open_er),
+        ("ЦБ РФ", _fetch_cbr),
+    ):
+        try:
+            rates = fetcher()
+            if rates and "RUB" in rates:
+                _cache.update(rates=rates, time=now)
+                return rates
+        except Exception as e:
+            logging.warning(f"{name} fail: {e}")
+
+    logging.error("Все источники курсов недоступны")
+    return None
 
 
 def get_history(code: str, days: int = 7):
-    """История с архива ЦБ РФ. Выходные пропускаются (ЦБ не публикует)."""
+    """Архив ЦБ РФ. Выходные пропускаются."""
     today = datetime.now()
     out = []
     for i in range(days):
@@ -74,7 +110,8 @@ def get_history(code: str, days: int = 7):
                 out.append((d.strftime("%d.%m"), 1.0))
             elif code in data.get("Valute", {}):
                 info = data["Valute"][code]
-                out.append((d.strftime("%d.%m"), info["Value"] / info["Nominal"]))
+                out.append((d.strftime("%d.%m"),
+                            info["Value"] / info["Nominal"]))
         except Exception:
             continue
     out.reverse()
