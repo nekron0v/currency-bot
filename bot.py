@@ -39,6 +39,9 @@ PENDING = {}
 PENDING_TTL = 600
 MSK = timezone(timedelta(hours=3))
 
+# Версия карточки — увеличивайте при смене дизайна, чтобы Telegram перекачал
+CARD_VERSION = 3
+
 if not TOKEN:
     raise SystemExit("BOT_TOKEN не задан в переменных окружения")
 
@@ -65,7 +68,7 @@ def build_receipt_result(amount, cur, rates):
 
 def _card_url(amount, frm, to) -> str:
     amount_str = f"{amount:g}".replace(",", ".")
-    return f"{WEBHOOK_URL}/card/{amount_str}/{frm}/{to}.png"
+    return f"{WEBHOOK_URL}/card/{amount_str}/{frm}/{to}.png?v={CARD_VERSION}"
 
 
 # ---------- Inline ----------
@@ -162,7 +165,8 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
             input_message_content=InputTextMessageContent(message_text=hint),
         ))
 
-    await update.inline_query.answer(results, cache_time=300)
+    # cache_time=1 — чтобы изменения дизайна в inline-превью были видны сразу
+    await update.inline_query.answer(results, cache_time=1)
 
 
 # ---------- Команды ----------
@@ -554,7 +558,11 @@ def build_star_app(ptb_app: Application) -> Starlette:
         return Response(
             buf.read(),
             media_type="image/png",
-            headers={"Cache-Control": "public, max-age=600"},
+            headers={
+                "Cache-Control": "no-cache, no-store, must-revalidate",
+                "Pragma": "no-cache",
+                "Expires": "0",
+            },
         )
 
     async def health(request):
@@ -566,9 +574,6 @@ def build_star_app(ptb_app: Application) -> Starlette:
         await ptb_app.start()
 
         url = f"{WEBHOOK_URL}{WEBHOOK_PATH}"
-        # Сбрасываем возможный старый webhook у Telegram (с другого контейнера),
-        # затем ставим свой. drop_pending_updates=False — чтобы доставить
-        # сообщения, накопившиеся пока бот был офлайн.
         try:
             await ptb_app.bot.delete_webhook(drop_pending_updates=False)
         except Exception as e:
@@ -584,8 +589,6 @@ def build_star_app(ptb_app: Application) -> Starlette:
         try:
             yield
         finally:
-            # НЕ вызываем delete_webhook — иначе при следующем деплое
-            # старый контейнер снесёт URL, установленный новым.
             try:
                 await ptb_app.stop()
             except Exception:
