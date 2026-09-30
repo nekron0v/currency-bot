@@ -22,7 +22,7 @@ from telegram.ext import (
 from rates import get_rates, get_history, format_chart, flag, format_number
 from receipt import ocr_space, ocr_tesseract, parse_receipt, parse_manual
 from storage import load_subs, save_subs
-from card import generate_card
+from card import generate_card, generate_chart_card, generate_multi_card
 
 # ---------- Конфиг ----------
 TOKEN = os.environ.get("BOT_TOKEN", "")
@@ -38,13 +38,13 @@ DIGEST_CODES = ["USD", "EUR", "CNY", "KZT", "TRY"]
 PENDING = {}
 PENDING_TTL = 600
 MSK = timezone(timedelta(hours=3))
-CARD_VERSION = 3
+CARD_VERSION = 5
+
 
 if not TOKEN:
     raise SystemExit("BOT_TOKEN не задан в переменных окружения")
 
 
-# ---------- Символы валют → коды ----------
 SYMBOL_TO_CODE = {
     "$": "USD", "€": "EUR", "₽": "RUB", "£": "GBP",
     "¥": "JPY", "₸": "KZT", "₺": "TRY", "₴": "UAH",
@@ -54,11 +54,9 @@ SYMBOL_TO_CODE = {
 
 
 def _resolve_currency(token: str):
-    """'$' → 'USD', 'usd' → 'USD', 'RUB' → 'RUB'. None если не знаем."""
     if not token:
         return None
     t = token.strip()
-    # Символьные обозначения — до upper(), потому что $ и € регистронезависимы
     if t in SYMBOL_TO_CODE:
         return SYMBOL_TO_CODE[t]
     t_up = t.upper()
@@ -67,7 +65,6 @@ def _resolve_currency(token: str):
     return t_up if len(t_up) == 3 and t_up.isalpha() else None
 
 
-# ---------- Помощники ----------
 def cleanup_pending():
     now = time.time()
     for uid in list(PENDING):
@@ -92,6 +89,22 @@ def _card_url(amount, frm, to) -> str:
     return f"{WEBHOOK_URL}/card/{amount_str}/{frm}/{to}.png?v={CARD_VERSION}"
 
 
+def _chart_url(code, days) -> str:
+    return f"{WEBHOOK_URL}/chart/{code}/{days}.png?v={CARD_VERSION}"
+
+
+def _png_response(buf):
+    return Response(
+        buf.read(),
+        media_type="image/png",
+        headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        },
+    )
+
+
 # ---------- Inline ----------
 async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
     parts = update.inline_query.query.strip().split()
@@ -101,7 +114,7 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     results = []
 
-    # ---------- 1) Конвертация: "10 USD RUB", "10 $ ₽", "10 USD ₽" ----------
+    # --- 1) Конвертация: "10 USD RUB", "10 $ ₽" ---
     if len(parts) == 3:
         try:
             amount = float(parts[0].replace(",", "."))
@@ -119,32 +132,34 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"{flag(f)} {format_number(amount)} {f} "
             f"= {flag(t)} {format_number(res)} {t}"
         )
-
         if WEBHOOK_URL:
-            card_url = _card_url(amount, f, t)
             results.append(InlineQueryResultPhoto(
                 id="card",
-                photo_url=card_url,
-                thumbnail_url=card_url,
-                title=text,
-                description="Карточка конвертации",
+                photo_url=_card_url(amount, f, t),
+                thumbnail_url=_card_url(amount, f, t),
+                title=text, description="Карточка конвертации",
                 caption=text,
-                photo_width=720,
-                photo_height=450,
+                photo_width=720, photo_height=450,
             ))
 
-    # ---------- 2) Одна валюта: "USD" или "$" → курс к рублю ----------
+    # --- 2) Одна валюта: "USD" / "$" → карточка курса к RUB ---
     elif len(parts) == 1:
         code = _resolve_currency(parts[0])
         if not code or code not in rates:
             await update.inline_query.answer([], cache_time=60)
             return
 
-        text = f"{flag(code)} 1 {code} = {format_number(rates[code])} RUB 🇷🇺"
-        results.append(InlineQueryResultArticle(
-            id="single", title=text, description="Курс к рублю",
-            input_message_content=InputTextMessageContent(message_text=text),
-        ))
+        if code != "RUB":
+            text = f"{flag(code)} 1 {code} = {format_number(rates[code])} RUB 🇷🇺"
+            if WEBHOOK_URL:
+                results.append(InlineQueryResultPhoto(
+                    id="rate",
+                    photo_url=_card_url(1, code, "RUB"),
+                    thumbnail_url=_card_url(1, code, "RUB"),
+                    title=text, description="Курс к рублю",
+                    caption=text,
+                    photo_width=720, photo_height=450,
+                ))
         for other in ("USD", "EUR"):
             if other == code:
                 continue
@@ -158,7 +173,7 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 input_message_content=InputTextMessageContent(message_text=line),
             ))
 
-    # ---------- 3) График: "USD 7" или "$ 7" ----------
+    # --- 3) График: "USD 7" → карточка-график ---
     elif len(parts) == 2:
         code = _resolve_currency(parts[0])
         if not code or code not in rates:
@@ -172,28 +187,33 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await update.inline_query.answer([], cache_time=60)
             return
+        if days < 2:
+            await update.inline_query.answer([], cache_time=60)
+            return
         hist = get_history(code, days)
         if len(hist) >= 2:
-            text = format_chart(code, hist)
-            results.append(InlineQueryResultArticle(
-                id="chart",
-                title=f"📊 {code}: график за {len(hist)} дн.",
-                description="Нажмите, чтобы отправить",
-                input_message_content=InputTextMessageContent(message_text=text),
-            ))
+            text = f"📊 {code} за {len(hist)} дн."
+            if WEBHOOK_URL:
+                results.append(InlineQueryResultPhoto(
+                    id="chart",
+                    photo_url=_chart_url(code, days),
+                    thumbnail_url=_chart_url(code, days),
+                    title=text, description="График курса",
+                    caption=text,
+                    photo_width=720, photo_height=450,
+                ))
 
-    # ---------- 4) Подсказка ----------
     else:
         hint = (
             "💱 Подсказка:\n"
             "• 100 USD RUB — карточка\n"
             "• 100 $ ₽ — то же самое\n"
-            "• USD или $ — курс к рублю\n"
+            "• $ — курс к рублю\n"
             "• USD 7 — график за 7 дней"
         )
         results.append(InlineQueryResultArticle(
             id="hint", title="💱 Введите: 100 $ ₽",
-            description="или USD RUB, USD, USD 7",
+            description="или USD RUB, $, USD 7",
             input_message_content=InputTextMessageContent(message_text=hint),
         ))
 
@@ -207,10 +227,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📌 Inline (в любом чате):\n"
         "`@ваш_бот 100 USD RUB` — карточка\n"
         "`@ваш_бот 100 $ ₽` — то же самое\n"
-        "`@ваш_бот $` — курс к рублю\n"
-        "`@ваш_бот USD 7` — график за 7 дней\n\n"
+        "`@ваш_бот $` — курс к рублю (карточка)\n"
+        "`@ваш_бот USD 7` — график (карточка)\n\n"
         "🖼 Карточка в личке:\n"
-        "`/convert 100 USD RUB`\n\n"
+        "`/convert 100 USD RUB`\n"
+        "`/chart USD 7`\n\n"
         "🔔 Подписки (в личке):\n"
         "`/subscribe USD > 95` — уведомить, когда выше 95\n"
         "`/subscribe USD < 90` — когда ниже 90\n"
@@ -229,14 +250,19 @@ async def chart_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     days = 7
     if len(context.args) > 1:
         try:
-            days = min(int(context.args[1]), 30)
+            days = min(max(int(context.args[1]), 2), 30)
         except ValueError:
             pass
     hist = get_history(code, days)
     if len(hist) < 2:
         await update.message.reply_text("Не удалось получить историю 😔")
         return
-    await update.message.reply_text(format_chart(code, hist))
+    try:
+        buf = generate_chart_card(code, hist)
+        await update.message.reply_photo(photo=buf)
+    except Exception as e:
+        logging.exception(f"chart card failed: {e}")
+        await update.message.reply_text(format_chart(code, hist))
 
 
 async def convert_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -251,7 +277,6 @@ async def convert_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     raw = " ".join(context.args)
-    # Сначала пробуем с символами ($ ₽), затем с кодами
     parsed = parse_manual(raw)
     if not parsed:
         tokens = raw.split()
@@ -274,7 +299,7 @@ async def convert_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not parsed:
         await update.message.reply_text(
-            "Не понял формат 🤔 Пример: `/convert 100 USD RUB` или `/convert 100 $ ₽`",
+            "Не понял 🤔 Пример: `/convert 100 USD RUB` или `/convert 100 $ ₽`",
             parse_mode="Markdown",
         )
         return
@@ -286,7 +311,6 @@ async def convert_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     result = amount * rates[cur] / rates[to_cur]
-
     try:
         buf = generate_card(cur, amount, to_cur, result)
         caption = (
@@ -431,20 +455,32 @@ async def handle_receipt(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     amount, cur = parsed["amount"], parsed["currency"]
-    result = build_receipt_result(amount, cur, rates)
+    text_result = build_receipt_result(amount, cur, rates)
 
     if parsed["confidence"] == "high":
         footer = "_Распознано автоматически. Если неверно — нажмите «Исправить»._"
     else:
         footer = f"⚠️ _{parsed['reason']}. Проверьте, пожалуйста._"
 
-    await status.edit_text(
-        f"{result}\n\n{footer}",
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton("✏️ Исправить", callback_data="fix")
-        ]]),
-    )
+    try:
+        await status.delete()
+    except Exception:
+        pass
+
+    rub_amount = amount * rates[cur]
+    caption = f"{text_result}\n\n{footer}"
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton("✏️ Исправить", callback_data="fix")
+    ]])
+
+    try:
+        buf = generate_card(cur, amount, "RUB", rub_amount)
+        await msg.reply_photo(photo=buf, caption=caption, reply_markup=keyboard,
+                              parse_mode="Markdown")
+    except Exception as e:
+        logging.exception(f"receipt card failed: {e}")
+        await msg.reply_text(caption, parse_mode="Markdown", reply_markup=keyboard)
+
     PENDING[update.effective_user.id] = {
         "amount": amount, "currency": cur, "ts": time.time(),
     }
@@ -454,11 +490,13 @@ async def on_fix(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     PENDING[update.effective_user.id] = {"ts": time.time()}
-    await query.edit_message_text(
-        "✏️ Напишите сумму и валюту:\n"
-        "`120 USD`\n"
-        "`120 $ ₽`\n"
-        "`120` — по умолчанию RUB",
+    await query.edit_message_caption(
+        caption=(
+            "✏️ Напишите сумму и валюту:\n"
+            "`120 USD`\n"
+            "`120 $ ₽`\n"
+            "`120` — по умолчанию RUB"
+        ),
         parse_mode="Markdown",
     )
 
@@ -509,10 +547,19 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     result = amount * rates[cur] / rates[to_cur]
-    await update.message.reply_text(
-        f"🧾 {flag(cur)} {format_number(amount)} {cur} "
-        f"= {flag(to_cur)} {format_number(result)} {to_cur}"
-    )
+    try:
+        buf = generate_card(cur, amount, to_cur, result)
+        caption = (
+            f"{flag(cur)} {format_number(amount)} {cur} = "
+            f"{flag(to_cur)} {format_number(result)} {to_cur}"
+        )
+        await update.message.reply_photo(photo=buf, caption=caption)
+    except Exception as e:
+        logging.exception(f"card generation failed: {e}")
+        await update.message.reply_text(
+            f"{flag(cur)} {format_number(amount)} {cur} = "
+            f"{flag(to_cur)} {format_number(result)} {to_cur}"
+        )
     PENDING.pop(uid, None)
 
 
@@ -559,17 +606,33 @@ async def send_daily_digest(context: ContextTypes.DEFAULT_TYPE):
     rates = get_rates()
     if not rates:
         return
-    lines = ["☀️ Доброе утро! Курсы валют:\n"]
-    for code in DIGEST_CODES:
-        if code in rates:
-            lines.append(
-                f"{flag(code)} 1 {code} = {format_number(rates[code])} RUB"
-            )
-    lines.append("\n💡 @ваш_бот 100 $ ₽ — карточка конвертации")
-    text = "\n".join(lines)
+
+    rows = [(c, rates[c]) for c in DIGEST_CODES if c in rates]
+    if not rows:
+        return
+
+    try:
+        buf = generate_multi_card("☀️ Курсы валют", rows)
+        img_bytes = buf.getvalue()
+    except Exception as e:
+        logging.exception(f"digest card failed: {e}")
+        img_bytes = None
+
+    text_fallback = "☀️ Доброе утро! Курсы валют:\n" + "\n".join(
+        f"{flag(c)} 1 {c} = {format_number(v)} RUB" for c, v in rows
+    ) + "\n\n💡 @ваш_бот 100 $ ₽ — карточка"
+
     for chat_id in subs["digests"]:
         try:
-            await context.bot.send_message(chat_id=int(chat_id), text=text)
+            if img_bytes:
+                await context.bot.send_photo(
+                    chat_id=int(chat_id),
+                    photo=img_bytes,
+                    caption="💡 @ваш_бот 100 $ ₽ — карточка конвертации",
+                )
+            else:
+                await context.bot.send_message(chat_id=int(chat_id),
+                                               text=text_fallback)
         except Exception as e:
             logging.error(f"digest to {chat_id}: {e}")
 
@@ -635,15 +698,24 @@ def build_star_app(ptb_app: Application) -> Starlette:
         except Exception as e:
             logging.exception(f"card endpoint: {e}")
             return Response("card error", status_code=500)
-        return Response(
-            buf.read(),
-            media_type="image/png",
-            headers={
-                "Cache-Control": "no-cache, no-store, must-revalidate",
-                "Pragma": "no-cache",
-                "Expires": "0",
-            },
-        )
+        return _png_response(buf)
+
+    async def chart_endpoint(request):
+        code = request.path_params["code"].upper()
+        try:
+            days = int(request.path_params["days"])
+        except ValueError:
+            return Response("bad days", status_code=400)
+        days = min(max(days, 2), 30)
+        hist = get_history(code, days)
+        if len(hist) < 2:
+            return Response("no history", status_code=400)
+        try:
+            buf = generate_chart_card(code, hist)
+        except Exception as e:
+            logging.exception(f"chart endpoint: {e}")
+            return Response("chart error", status_code=500)
+        return _png_response(buf)
 
     async def health(request):
         return Response("ok")
@@ -682,6 +754,7 @@ def build_star_app(ptb_app: Application) -> Starlette:
         routes=[
             Route(WEBHOOK_PATH, telegram_webhook, methods=["POST"]),
             Route("/card/{amount}/{from_code}/{to_code}.png", card_endpoint),
+            Route("/chart/{code}/{days}.png", chart_endpoint),
             Route("/", health),
         ],
         lifespan=lifespan,

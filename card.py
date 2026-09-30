@@ -27,6 +27,8 @@ TEXT_COLOR = (12, 12, 18)
 LINE_COLOR = (228, 228, 234)
 SWAP_BG = (232, 224, 250)
 SWAP_FG = (110, 62, 190)
+CHART_LINE = (124, 76, 200)
+CHART_FILL = (124, 76, 200, 40)
 
 
 def _load_font(size):
@@ -40,7 +42,8 @@ def _load_font(size):
 
 
 def _fmt(x):
-    if x >= 1:
+    abs_x = abs(x)
+    if abs_x >= 1:
         return f"{x:.2f}".rstrip("0").rstrip(".").replace(".", ",")
     return f"{x:.4f}".rstrip("0").rstrip(".").replace(".", ",")
 
@@ -137,44 +140,40 @@ def _swap_icon(draw, cx, cy, r):
     ], fill=color)
 
 
+# ============================================================
+# 1) Карточка конвертации: "10 USD → RUB"
+# ============================================================
 def generate_card(from_code, from_amount, to_code, to_amount,
                   base_w=720, base_h=450):
-    """Горизонтальная 720x450 (16:10), пропорции выверены по @send."""
     SS = 2
-    W = base_w * SS           # 1440
-    H = base_h * SS           # 900
+    W = base_w * SS
+    H = base_h * SS
 
     img = Image.new("RGB", (W, H), GRADIENT_TOP)
     _gradient(img, GRADIENT_TOP, GRADIENT_BOTTOM)
     _pattern(img, W, H)
-
     draw = ImageDraw.Draw(img)
 
-    # ----- Карточка (отступы X < Y, как у @send) -----
-    margin_x = int(W * 0.070)        # 100 из 1440 = 7.0%
-    margin_y = int(H * 0.142)        # 128 из 900 = 14.2%
+    margin_x = int(W * 0.070)
+    margin_y = int(H * 0.142)
     radius = int(H * 0.10)
     draw.rounded_rectangle(
         [margin_x, margin_y, W - margin_x, H - margin_y],
         radius=radius, fill=CARD_BG,
     )
 
-    # Внутренний отступ карточки
     pad = int(H * 0.05)
     inner_x0 = margin_x + pad
     inner_x1 = W - margin_x - pad
 
-    # ----- Кружок символа валюты -----
-    circle_r = int(H * 0.058)                          # 52 из 900
+    circle_r = int(H * 0.058)
     circle_cx = inner_x0 + circle_r
     code_x = circle_cx + circle_r + int(H * 0.042)
 
-    # ----- Позиции строк -----
     row1_y = int(H * 0.254)
     row2_y = int(H * 0.725)
     mid_y = H // 2
 
-    # ----- Шрифты (одинаковые для кода и суммы) -----
     f_sym = _load_font(int(H * 0.056))
     f_code = _load_font(int(H * 0.092))
     amount_size = int(H * 0.092)
@@ -192,7 +191,6 @@ def generate_card(from_code, from_amount, to_code, to_amount,
     row(from_code, from_amount, row1_y)
     row(to_code, to_amount, row2_y)
 
-    # ----- Разделитель с прорезью под swap -----
     swap_r = int(H * 0.046)
     line_w = max(1, int(H * 0.0022))
     gap = int(H * 0.014)
@@ -204,7 +202,156 @@ def generate_card(from_code, from_amount, to_code, to_amount,
     _swap_icon(draw, W // 2, mid_y, swap_r)
 
     img = img.resize((base_w, base_h), Image.LANCZOS)
+    buf = BytesIO()
+    img.save(buf, format="PNG", optimize=True)
+    buf.seek(0)
+    return buf
 
+
+# ============================================================
+# 2) Карточка-график: динамика курса за N дней
+# ============================================================
+def generate_chart_card(code, history, base_w=720, base_h=450):
+    """history: список [(label, value), ...]"""
+    SS = 2
+    W = base_w * SS
+    H = base_h * SS
+
+    img = Image.new("RGB", (W, H), GRADIENT_TOP)
+    _gradient(img, GRADIENT_TOP, GRADIENT_BOTTOM)
+    _pattern(img, W, H)
+    draw = ImageDraw.Draw(img)
+
+    margin_x = int(W * 0.070)
+    margin_y = int(H * 0.142)
+    radius = int(H * 0.10)
+    draw.rounded_rectangle(
+        [margin_x, margin_y, W - margin_x, H - margin_y],
+        radius=radius, fill=CARD_BG,
+    )
+
+    pad = int(H * 0.055)
+    inner_x0 = margin_x + pad
+    inner_x1 = W - margin_x - pad
+    inner_y0 = margin_y + pad
+    inner_y1 = H - margin_y - pad
+
+    values = [v for _, v in history]
+    if len(values) < 2:
+        values = values * 2
+
+    # --- Заголовок и текущее значение ---
+    f_header = _load_font(int(H * 0.055))
+    f_current = _load_font(int(H * 0.105))
+
+    _draw_lm(draw, inner_x0, inner_y0 + int(H * 0.045),
+             f"{code} → RUB", f_header, TEXT_COLOR)
+    _draw_rm(draw, inner_x1, inner_y0 + int(H * 0.045),
+             _fmt(values[-1]), f_current, TEXT_COLOR)
+
+    # --- Область для графика ---
+    chart_y0 = inner_y0 + int(H * 0.20)
+    chart_y1 = inner_y1 - int(H * 0.16)
+    chart_h = chart_y1 - chart_y0
+    chart_w = inner_x1 - inner_x0
+
+    lo = min(values)
+    hi = max(values)
+    if hi == lo:
+        hi = lo + 1
+
+    n = len(values)
+    pts = []
+    for i, v in enumerate(values):
+        x = inner_x0 + int(i * chart_w / max(n - 1, 1))
+        y = chart_y1 - int((v - lo) / (hi - lo) * chart_h)
+        pts.append((x, y))
+
+    # Заливка под линией
+    fill_layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    fd = ImageDraw.Draw(fill_layer)
+    polygon = [(pts[0][0], chart_y1)] + pts + [(pts[-1][0], chart_y1)]
+    fd.polygon(polygon, fill=CHART_FILL)
+    img.paste(fill_layer, (0, 0), fill_layer)
+
+    # Линия
+    line_w = max(3, int(H * 0.007))
+    for i in range(len(pts) - 1):
+        draw.line([pts[i], pts[i + 1]], fill=CHART_LINE, width=line_w)
+
+    # Точки на краях
+    r = max(4, int(H * 0.009))
+    for p in (pts[0], pts[-1]):
+        draw.ellipse([p[0] - r, p[1] - r, p[0] + r, p[1] + r],
+                     fill=CHART_LINE)
+
+    # --- Футер: мин / макс / изменение ---
+    f_small = _load_font(int(H * 0.048))
+    delta = values[-1] - values[0]
+    sign = "+" if delta >= 0 else "−"
+    change = f"{sign}{_fmt(abs(delta))}"
+    footer = f"Мин {_fmt(lo)}    Макс {_fmt(hi)}    {change}"
+    _draw_mm(draw, W // 2, inner_y1 - int(H * 0.045),
+             footer, f_small, TEXT_COLOR)
+
+    img = img.resize((base_w, base_h), Image.LANCZOS)
+    buf = BytesIO()
+    img.save(buf, format="PNG", optimize=True)
+    buf.seek(0)
+    return buf
+
+
+# ============================================================
+# 3) Карточка-список: несколько курсов (для дайджеста)
+# ============================================================
+def generate_multi_card(title, rows, base_w=720, base_h=620):
+    """rows: [(code, amount_float), ...]"""
+    SS = 2
+    W = base_w * SS
+    H = base_h * SS
+
+    img = Image.new("RGB", (W, H), GRADIENT_TOP)
+    _gradient(img, GRADIENT_TOP, GRADIENT_BOTTOM)
+    _pattern(img, W, H)
+    draw = ImageDraw.Draw(img)
+
+    margin_x = int(W * 0.070)
+    margin_y = int(H * 0.075)
+    radius = int(W * 0.06)
+    draw.rounded_rectangle(
+        [margin_x, margin_y, W - margin_x, H - margin_y],
+        radius=radius, fill=CARD_BG,
+    )
+
+    pad = int(H * 0.055)
+    inner_x0 = margin_x + pad
+    inner_x1 = W - margin_x - pad
+    inner_y0 = margin_y + pad
+
+    f_title = _load_font(int(H * 0.055))
+    _draw_lm(draw, inner_x0, inner_y0 + int(H * 0.025),
+             title, f_title, TEXT_COLOR)
+
+    n = len(rows)
+    rows_y0 = inner_y0 + int(H * 0.11)
+    rows_y1 = H - margin_y - pad
+    row_h = (rows_y1 - rows_y0) // max(n, 1)
+
+    circle_r = int(H * 0.028)
+    f_sym = _load_font(int(H * 0.032))
+    f_code = _load_font(int(H * 0.052))
+    f_val = _load_font(int(H * 0.052))
+
+    for i, (code, amount) in enumerate(rows):
+        y = rows_y0 + row_h // 2 + i * row_h
+        cx = inner_x0 + circle_r
+        _circle_symbol(draw, cx, y, circle_r,
+                       CURRENCY_SYMBOLS.get(code, code[:1]), f_sym)
+        code_x = cx + circle_r + int(H * 0.025)
+        _draw_lm(draw, code_x, y, code, f_code, TEXT_COLOR)
+        _draw_rm(draw, inner_x1, y, _fmt(amount), f_val, TEXT_COLOR)
+
+    img = img.resize((base_w, base_h), Image.LANCZOS)
     buf = BytesIO()
     img.save(buf, format="PNG", optimize=True)
     buf.seek(0)
