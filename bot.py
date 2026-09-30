@@ -222,27 +222,47 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ---------- Команды ----------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "👋 Я бот-курсы валют.\n\n"
-        "📌 Inline (в любом чате):\n"
-        "`@ваш_бот 100 USD RUB` — карточка\n"
-        "`@ваш_бот 100 $ ₽` — то же самое\n"
-        "`@ваш_бот $` — курс к рублю (карточка)\n"
-        "`@ваш_бот USD 7` — график (карточка)\n\n"
-        "🖼 Карточка в личке:\n"
-        "`/convert 100 USD RUB`\n"
-        "`/chart USD 7`\n\n"
-        "🔔 Подписки (в личке):\n"
-        "`/subscribe USD > 95` — уведомить, когда выше 95\n"
+    text = (
+        "✨ *Курсы валют — прямо в чате*\n"
+        "━━━━━━━━━━━━━━━━━━━━━\n\n"
+
+        "💱 *Inline — в любом чате*\n"
+        "`@toycourse_bot 100 USD RUB`\n"
+        "  →  карточка конвертации\n\n"
+        "`@toycourse_bot 100 $ ₽`\n"
+        "  →  то же самое, короче\n\n"
+        "`@toycourse_bot $`\n"
+        "  →  курс к рублю карточкой\n\n"
+        "`@toycourse_bot USD 7`\n"
+        "  →  график за 7 дней\n\n"
+
+        "━━━━━━━━━━━━━━━━━━━━━\n\n"
+
+        "🖼 *Команды в личке*\n"
+        "`/convert 100 USD RUB` — карточка конвертации\n"
+        "`/chart USD 7` — график за 7 дней\n\n"
+
+        "━━━━━━━━━━━━━━━━━━━━━\n\n"
+
+        "🔔 *Подписки на порог*\n"
+        "`/subscribe USD > 95` — когда выше 95\n"
         "`/subscribe USD < 90` — когда ниже 90\n"
-        "/mysubs — список\n"
-        "/unsubscribe USD — удалить\n\n"
-        "☀️ Утренняя сводка:\n"
-        "/digest_on — включить (в 9:00 МСК)\n"
-        "/digest_off — выключить\n\n"
-        "🧾 Отправьте фото чека — распознаю сумму.",
-        parse_mode="Markdown",
+        "`/mysubs` — мои подписки\n"
+        "`/unsubscribe USD` — удалить\n\n"
+
+        "━━━━━━━━━━━━━━━━━━━━━\n\n"
+
+        "☀️ *Утренняя сводка* — 9:00 МСК\n"
+        "`/digest_on` — включить\n"
+        "`/digest_off` — выключить\n\n"
+
+        "━━━━━━━━━━━━━━━━━━━━━\n\n"
+
+        "🧾 *Фото чека*\n"
+        "Отправьте фото — распознаю сумму\n"
+        "и сконвертирую в RUB, USD, EUR.\n"
     )
+    await update.message.reply_text(text, parse_mode="Markdown")
 
 
 async def chart_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
